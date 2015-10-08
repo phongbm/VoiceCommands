@@ -5,8 +5,11 @@ import android.os.Bundle;
 import android.speech.tts.TextToSpeech;
 import android.support.v7.app.AppCompatActivity;
 import android.util.Log;
+import android.view.View;
 
 import com.phongbm.common.CommonValue;
+
+import java.io.OutputStream;
 
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "MainActivity";
@@ -16,7 +19,43 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         this.setContentView(R.layout.activity_main);
+        this.setPermissions();
         this.checkTextToSpeechEngine();
+
+        (findViewById(R.id.btnCall)).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                Intent intent = new Intent();
+                intent.setAction("COMMAND");
+                intent.putExtra("ACTION", "CALL");
+                MainActivity.this.sendBroadcast(intent);
+            }
+        });
+
+        (findViewById(R.id.btnMessage)).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                Intent intent = new Intent();
+                intent.setAction("COMMAND");
+                intent.putExtra("ACTION", "MESSAGE");
+                MainActivity.this.sendBroadcast(intent);
+            }
+        });
+    }
+
+    private void setPermissions() {
+        try {
+            Process process = Runtime.getRuntime().exec("su", null, null);
+            OutputStream outputStream = process.getOutputStream();
+            outputStream.write(("pm grant " + this.getPackageName()
+                    + " android.permission.MODIFY_PHONE_STATE\n")
+                    .getBytes("ASCII"));
+            outputStream.flush();
+            outputStream.close();
+            process.waitFor();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     private void startService() {

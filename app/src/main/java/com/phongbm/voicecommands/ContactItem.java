@@ -1,6 +1,11 @@
 package com.phongbm.voicecommands;
 
+import com.phongbm.common.CommonValue;
+
 public class ContactItem {
+    private static final String TAG = "ContactItem";
+    private static String typeOfComparisons;
+
     private String number, displayName;
 
     public ContactItem(String number, String displayName) {
@@ -18,8 +23,22 @@ public class ContactItem {
 
     @Override
     public boolean equals(Object object) {
-        return object != null && (object instanceof ContactItem)
-                && (number.equals(((ContactItem) object).getNumber()));
+        if (object == null || !(object instanceof ContactItem)) {
+            return false;
+        }
+        switch (typeOfComparisons) {
+            case CommonValue.TYPE_NUMBER:
+                return number.equals(((ContactItem) object).getNumber());
+            case CommonValue.TYPE_DISPLAY_NAME:
+                return displayName.toUpperCase().equals(
+                        ((ContactItem) object).getDisplayName().toUpperCase());
+            default:
+                return false;
+        }
+    }
+
+    public static void setTypeOfComparisons(String typeOfComparisons) {
+        ContactItem.typeOfComparisons = typeOfComparisons;
     }
 
 }

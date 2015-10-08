@@ -1,23 +1,31 @@
 package com.phongbm.voicecommands;
 
+import android.Manifest;
 import android.app.Service;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.media.AudioManager;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.provider.ContactsContract;
+import android.provider.Telephony;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
+import android.support.v4.content.ContextCompat;
 import android.telephony.PhoneStateListener;
+import android.telephony.SmsMessage;
 import android.telephony.TelephonyManager;
 import android.util.Log;
+
+import com.phongbm.common.CommonValue;
 
 import java.util.ArrayList;
 import java.util.Locale;
@@ -29,10 +37,13 @@ public class VoiceCommandsService extends Service {
     private TextToSpeechEngine textToSpeechEngine;
     private AudioManager audioManager;
     private IncomingCallReceiver incomingCallReceiver;
+    private SMSReceiver smsReceiver;
     private ArrayList<ContactItem> contactItems;
     private Intent speechRecognizerIntent;
     private SpeechRecognizer speechRecognizer;
-    private boolean isCallStateRinging, isRinging;
+    private boolean isCallStateRinging, isRinging, isReceivedSms, isCommandCall;
+    private String messageBody;
+    private VCReceiver vcReceiver;
 
     @Override
     public void onCreate() {
@@ -42,6 +53,11 @@ public class VoiceCommandsService extends Service {
         audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         isCallStateRinging = false;
         isRinging = false;
+        isReceivedSms = false;
+        isCommandCall = false;
+        messageBody = null;
+
+        textToSpeechEngine = new TextToSpeechEngine(context);
 
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
         speechRecognizerIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
@@ -57,7 +73,10 @@ public class VoiceCommandsService extends Service {
         speechRecognizerIntent.putExtra(
                 RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 10000);
         speechRecognizer.setRecognitionListener(new SpeechRecognitionListener());
+
         this.registerIncomingCallReceiver();
+        this.registerSMSReceiver();
+        this.registerVCReceiver();
     }
 
     @Override
@@ -81,8 +100,30 @@ public class VoiceCommandsService extends Service {
         this.registerReceiver(incomingCallReceiver, intentFilter);
     }
 
+    private void registerSMSReceiver() {
+        if (smsReceiver == null) {
+            smsReceiver = new SMSReceiver();
+        }
+        IntentFilter intentFilter = new IntentFilter();
+        intentFilter.addAction("android.provider.Telephony.SMS_RECEIVED");
+        this.registerReceiver(smsReceiver, intentFilter);
+    }
+
+    private void registerVCReceiver() {
+        if (vcReceiver == null) {
+            vcReceiver = new VCReceiver();
+        }
+        IntentFilter intentFilter = new IntentFilter();
+        intentFilter.addAction("COMMAND");
+        this.registerReceiver(vcReceiver, intentFilter);
+    }
+
     private void initializeContacts() {
-        contactItems = new ArrayList<>();
+        if (contactItems == null) {
+            contactItems = new ArrayList<>();
+        } else {
+            contactItems.clear();
+        }
         Cursor cursor = context.getContentResolver().query(
                 ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
                 new String[]{ContactsContract.CommonDataKinds.Phone.NUMBER,
@@ -106,6 +147,15 @@ public class VoiceCommandsService extends Service {
         int index = contactItems.indexOf(contactItem);
         if (index >= 0) {
             return contactItems.get(index).getDisplayName();
+        }
+        return null;
+    }
+
+    private String getNumberFromDisplayName(String displayName) {
+        ContactItem contactItem = new ContactItem(null, displayName);
+        int index = contactItems.indexOf(contactItem);
+        if (index >= 0) {
+            return contactItems.get(index).getNumber();
         }
         return null;
     }
@@ -138,10 +188,6 @@ public class VoiceCommandsService extends Service {
         @Override
         public void onError(int error) {
             Log.i(TAG, "onError");
-            if (isRinging) {
-                Log.i(TAG, "isRinging...");
-                speechRecognizer.startListening(speechRecognizerIntent);
-            }
             switch (error) {
                 case SpeechRecognizer.ERROR_AUDIO:
                     Log.i(TAG, "ERROR_AUDIO");
@@ -171,6 +217,14 @@ public class VoiceCommandsService extends Service {
                     Log.i(TAG, "ERROR_SPEECH_TIMEOUT");
                     break;
             }
+            if (isRinging) {
+                Log.i(TAG, "isRinging...");
+                speechRecognizer.startListening(speechRecognizerIntent);
+            }
+            if (isReceivedSms) {
+                Log.i(TAG, "isReceivedSms...");
+                speechRecognizer.startListening(speechRecognizerIntent);
+            }
         }
 
         @Override
@@ -184,17 +238,56 @@ public class VoiceCommandsService extends Service {
                     switch (resultsRecognition.get(0).toUpperCase()) {
                         case "OK":
                             Log.i(TAG, "Accept...");
-                            CallControl.getInstance().answerRingingCall(context);
+                            isRinging = false;
                             speechRecognizer.stopListening();
+                            CallControl.getInstance().answerRingingCall(context);
                             break;
                         case "GOOGLE":
                             Log.i(TAG, "Divert...");
                             CallControl.getInstance().endCall(context);
                             break;
                     }
+                    speechRecognizer.startListening(speechRecognizerIntent);
+                }
+                if (isReceivedSms) {
+                    switch (resultsRecognition.get(0).toUpperCase()) {
+                        case "READ":
+                            Log.i(TAG, messageBody);
+                            textToSpeechEngine.speakOut(TextToSpeech.QUEUE_ADD, messageBody);
+                            break;
+                    }
+                    speechRecognizer.startListening(speechRecognizerIntent);
+                }
+                if (isCommandCall) {
+                    String result = resultsRecognition.get(0);
+                    Log.i(TAG, result);
+                    int indexFirstSpace = result.indexOf(" ");
+                    if (indexFirstSpace == -1) {
+                        return;
+                    }
+                    String command = result.substring(0, indexFirstSpace);
+                    String content = result.substring(indexFirstSpace + 1);
+                    Log.i(TAG, command);
+                    Log.i(TAG, content);
+                    ContactItem.setTypeOfComparisons(CommonValue.TYPE_DISPLAY_NAME);
+                    String number = VoiceCommandsService.this.getNumberFromDisplayName(content);
+                    if (number == null) {
+                        Log.i(TAG, "NULL");
+                        return;
+                    }
+                    Log.i(TAG, "Number: " + number);
+                    isCommandCall = false;
+
+                    Intent callIntent = new Intent(Intent.ACTION_CALL);
+                    callIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    callIntent.setData(Uri.parse("tel:" + number));
+                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE)
+                            != PackageManager.PERMISSION_GRANTED) {
+                        return;
+                    }
+                    VoiceCommandsService.this.startActivity(callIntent);
                 }
             }
-
         }
 
         @Override
@@ -208,12 +301,10 @@ public class VoiceCommandsService extends Service {
         }
     }
 
-    public class IncomingCallReceiver extends BroadcastReceiver {
+    private class IncomingCallReceiver extends BroadcastReceiver {
         private static final String TAG = "IncomingCallReceiver";
 
         public IncomingCallReceiver() {
-            textToSpeechEngine = new TextToSpeechEngine(context);
-            textToSpeechEngine.setUtteranceId("INCOMING_CALL");
         }
 
         @Override
@@ -223,6 +314,9 @@ public class VoiceCommandsService extends Service {
                 return;
             }
             isCallStateRinging = true;
+
+            textToSpeechEngine.setUtteranceId("INCOMING_CALL");
+
             try {
                 TelephonyManager telephonyManager = (TelephonyManager) context
                         .getSystemService(Context.TELEPHONY_SERVICE);
@@ -234,6 +328,8 @@ public class VoiceCommandsService extends Service {
         }
 
         private class MyPhoneStateListener extends PhoneStateListener {
+            private static final String TAG = "MyPhoneStateListener";
+
             @Override
             public void onCallStateChanged(int state, String incomingNumber) {
                 Log.i(TAG, "State: " + state + "\n"
@@ -253,6 +349,7 @@ public class VoiceCommandsService extends Service {
                         isRinging = true;
                         int index = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
                         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, index, 0);
+                        ContactItem.setTypeOfComparisons(CommonValue.TYPE_NUMBER);
                         String displayName = VoiceCommandsService.this
                                 .getDisplayNameFromNumber(incomingNumber);
                         if (displayName != null) {
@@ -263,7 +360,7 @@ public class VoiceCommandsService extends Service {
                                     "Incoming call from " + incomingNumber);
                         }
                         textToSpeechEngine.pause(1000);
-                        textToSpeechEngine.speakOut(TextToSpeech.QUEUE_ADD, "Accept or divert?");
+                        textToSpeechEngine.speakOut(TextToSpeech.QUEUE_ADD, "Accept or divert");
 
                         new Handler().postDelayed(new Runnable() {
                             @Override
@@ -283,9 +380,90 @@ public class VoiceCommandsService extends Service {
         }
     }
 
+    private class SMSReceiver extends BroadcastReceiver {
+        private static final String TAG = "SMSReceiver";
+
+        public SMSReceiver() {
+        }
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            Log.i(TAG, "onReceive...");
+
+            textToSpeechEngine.setUtteranceId("SMS_RECEIVED");
+
+            Bundle bundle = intent.getExtras();
+            final Object[] objects = (Object[]) bundle.get("pdus");
+            if (objects == null) {
+                return;
+            }
+            isReceivedSms = true;
+            String displayOriginatingAddress = null;
+            for (int i = 0; i < objects.length; i++) {
+                SmsMessage smsMessage;
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                    smsMessage = SmsMessage.createFromPdu((byte[]) objects[i],
+                            Telephony.Sms.Intents.SMS_RECEIVED_ACTION);
+                } else {
+                    smsMessage = SmsMessage.createFromPdu((byte[]) objects[i]);
+                }
+                displayOriginatingAddress = smsMessage.getDisplayOriginatingAddress();
+                messageBody = smsMessage.getMessageBody();
+            }
+            ContactItem.setTypeOfComparisons(CommonValue.TYPE_NUMBER);
+            String displayName = VoiceCommandsService.this
+                    .getDisplayNameFromNumber(displayOriginatingAddress);
+            if (displayName != null) {
+                textToSpeechEngine.speakOut(TextToSpeech.QUEUE_FLUSH,
+                        "There is a new text message from " + displayName);
+            } else {
+                textToSpeechEngine.speakOut(TextToSpeech.QUEUE_FLUSH,
+                        "There is a new text message from " + displayOriginatingAddress);
+            }
+            textToSpeechEngine.pause(1000);
+            textToSpeechEngine.speakOut(TextToSpeech.QUEUE_ADD, "To read now, say read");
+
+            new Handler().postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    speechRecognizer.startListening(speechRecognizerIntent);
+                }
+            }, 10000);
+
+            new Handler().postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    isReceivedSms = false;
+                }
+            }, 20000);
+        }
+
+    }
+
+    private class VCReceiver extends BroadcastReceiver {
+        private static final String TAG = "VCReceiver";
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getStringExtra("ACTION");
+            switch (action) {
+                case "CALL":
+                    Log.i(TAG, "CALL");
+                    isCommandCall = true;
+                    speechRecognizer.startListening(speechRecognizerIntent);
+                    break;
+                case "MESSAGE":
+                    Log.i(TAG, "MESSAGE");
+                    break;
+            }
+        }
+    }
+
     @Override
     public void onDestroy() {
         this.unregisterReceiver(incomingCallReceiver);
+        this.unregisterReceiver(smsReceiver);
+        this.unregisterReceiver(vcReceiver);
         textToSpeechEngine.shutdown();
         speechRecognizer.destroy();
         super.onDestroy();
