@@ -7,13 +7,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
-import android.database.Cursor;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
-import android.provider.ContactsContract;
 import android.provider.Telephony;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
@@ -24,8 +22,6 @@ import android.telephony.PhoneStateListener;
 import android.telephony.SmsMessage;
 import android.telephony.TelephonyManager;
 import android.util.Log;
-
-import com.phongbm.common.CommonValue;
 
 import java.util.ArrayList;
 import java.util.Locale;
@@ -38,7 +34,7 @@ public class VoiceCommandsService extends Service {
     private AudioManager audioManager;
     private IncomingCallReceiver incomingCallReceiver;
     private SMSReceiver smsReceiver;
-    private ArrayList<ContactItem> contactItems;
+    private ContactManager contactManager;
     private Intent speechRecognizerIntent;
     private SpeechRecognizer speechRecognizer;
     private boolean isCallStateRinging, isRinging, isReceivedSms, isCommandCall;
@@ -57,6 +53,7 @@ public class VoiceCommandsService extends Service {
         isCommandCall = false;
         messageBody = null;
 
+        contactManager = new ContactManager(context);
         textToSpeechEngine = new TextToSpeechEngine(context);
 
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
@@ -87,7 +84,7 @@ public class VoiceCommandsService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         Log.i(TAG, "onStartCommand...");
-        this.initializeContacts();
+        contactManager.getContacts();
         return Service.START_STICKY;
     }
 
@@ -116,48 +113,6 @@ public class VoiceCommandsService extends Service {
         IntentFilter intentFilter = new IntentFilter();
         intentFilter.addAction("COMMAND");
         this.registerReceiver(vcReceiver, intentFilter);
-    }
-
-    private void initializeContacts() {
-        if (contactItems == null) {
-            contactItems = new ArrayList<>();
-        } else {
-            contactItems.clear();
-        }
-        Cursor cursor = context.getContentResolver().query(
-                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                new String[]{ContactsContract.CommonDataKinds.Phone.NUMBER,
-                        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME},
-                null, null, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC");
-        if (cursor != null) {
-            int indexNumber = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER);
-            int indexDisplayName = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME);
-            cursor.moveToFirst();
-            while (!cursor.isAfterLast()) {
-                contactItems.add(new ContactItem(cursor.getString(indexNumber),
-                        cursor.getString(indexDisplayName)));
-                cursor.moveToNext();
-            }
-            cursor.close();
-        }
-    }
-
-    private String getDisplayNameFromNumber(String number) {
-        ContactItem contactItem = new ContactItem(number, null);
-        int index = contactItems.indexOf(contactItem);
-        if (index >= 0) {
-            return contactItems.get(index).getDisplayName();
-        }
-        return null;
-    }
-
-    private String getNumberFromDisplayName(String displayName) {
-        ContactItem contactItem = new ContactItem(null, displayName);
-        int index = contactItems.indexOf(contactItem);
-        if (index >= 0) {
-            return contactItems.get(index).getNumber();
-        }
-        return null;
     }
 
     private class SpeechRecognitionListener implements RecognitionListener {
@@ -240,7 +195,7 @@ public class VoiceCommandsService extends Service {
                             Log.i(TAG, "Accept...");
                             isRinging = false;
                             speechRecognizer.stopListening();
-                            CallControl.getInstance().answerRingingCall(context);
+                            // CallControl.getInstance().answerRingingCall(context);
                             break;
                         case "GOOGLE":
                             Log.i(TAG, "Divert...");
@@ -269,8 +224,7 @@ public class VoiceCommandsService extends Service {
                     String content = result.substring(indexFirstSpace + 1);
                     Log.i(TAG, command);
                     Log.i(TAG, content);
-                    ContactItem.setTypeOfComparisons(CommonValue.TYPE_DISPLAY_NAME);
-                    String number = VoiceCommandsService.this.getNumberFromDisplayName(content);
+                    String number = contactManager.getNumberFromDisplayName(content);
                     if (number == null) {
                         Log.i(TAG, "NULL");
                         return;
@@ -337,6 +291,8 @@ public class VoiceCommandsService extends Service {
                 switch (state) {
                     case TelephonyManager.CALL_STATE_IDLE:
                         Log.i(TAG, "CALL_STATE_IDLE...");
+                        isCommandCall = false;
+
                         isRinging = false;
                         textToSpeechEngine.stop();
                         speechRecognizer.stopListening();
@@ -349,9 +305,7 @@ public class VoiceCommandsService extends Service {
                         isRinging = true;
                         int index = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
                         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, index, 0);
-                        ContactItem.setTypeOfComparisons(CommonValue.TYPE_NUMBER);
-                        String displayName = VoiceCommandsService.this
-                                .getDisplayNameFromNumber(incomingNumber);
+                        String displayName = contactManager.getDisplayNameFromNumber(incomingNumber);
                         if (displayName != null) {
                             textToSpeechEngine.speakOut(TextToSpeech.QUEUE_FLUSH,
                                     "Incoming call from " + displayName);
@@ -371,7 +325,9 @@ public class VoiceCommandsService extends Service {
                         break;
                     case TelephonyManager.CALL_STATE_OFFHOOK:
                         Log.i(TAG, "CALL_STATE_OFFHOOK...");
-                        isRinging = true;
+                        isCommandCall = false;
+
+                        isRinging = false;
                         textToSpeechEngine.stop();
                         speechRecognizer.stopListening();
                         break;
@@ -410,9 +366,7 @@ public class VoiceCommandsService extends Service {
                 displayOriginatingAddress = smsMessage.getDisplayOriginatingAddress();
                 messageBody = smsMessage.getMessageBody();
             }
-            ContactItem.setTypeOfComparisons(CommonValue.TYPE_NUMBER);
-            String displayName = VoiceCommandsService.this
-                    .getDisplayNameFromNumber(displayOriginatingAddress);
+            String displayName = contactManager.getDisplayNameFromNumber(displayOriginatingAddress);
             if (displayName != null) {
                 textToSpeechEngine.speakOut(TextToSpeech.QUEUE_FLUSH,
                         "There is a new text message from " + displayName);
